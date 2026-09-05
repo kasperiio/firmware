@@ -1,0 +1,125 @@
+#!/bin/sh
+# Fullhan 3.0.8 kernels oops in rtnl_fill_ifinfo() on netlink link dumps, leaving
+# the caller stuck holding rtnl_lock. busybox ip dumps the link table before
+# almost every operation (ll_init_map), so answer the common queries from /proc
+# and translate the forms busybox ifupdown and S40network emit into ifconfig
+# and route; anything else still goes to the real busybox ip.
+prefix() { # dotted netmask -> prefix length
+	echo "$1" | awk -F. '{n=0; for(i=1;i<=4;i++){m=$i; while(m>0){n+=m%2; m=int(m/2)}}; print n}'
+}
+netmask() { # prefix length -> dotted netmask
+	awk -v p="$1" 'BEGIN{for(i=0;i<4;i++){b=p>=8?8:(p>0?p:0); p-=8; printf "%s%d", (i?".":""), 256-2^(8-b)}}'
+}
+case "$1" in
+route|r)
+	case "$2" in
+	add|del|delete|change|replace)
+		op=$2; [ "$op" = "delete" ] && op=del
+		shift 2
+		dst=$1; shift
+		gw=""; dev=""; metric=""
+		while [ $# -gt 0 ]; do
+			case "$1" in
+			via) gw=$2; shift ;;
+			dev) dev=$2; shift ;;
+			metric) metric=$2; shift ;;
+			esac
+			shift
+		done
+		case "$dst" in
+		default|0/0|0.0.0.0/0) set -- default ;;
+		*/*) set -- -net "${dst%/*}" netmask "$(netmask "${dst#*/}")" ;;
+		*) set -- -host "$dst" ;;
+		esac
+		exec route "$op" "$@" ${gw:+gw $gw} ${metric:+metric $metric} ${dev:+dev $dev}
+		;;
+	""|show|list) ;;
+	*) exec busybox ip "$@" ;;
+	esac
+	route -n | awk 'NR>2 && $1=="0.0.0.0" {print "default via " $2 " dev " $8}'
+	route -n | awk 'NR>2 && $1!="0.0.0.0"' | while read dst gw mask flags a b c dev; do
+		src=$(ifconfig $dev 2>/dev/null | awk '/inet addr/{sub("addr:","",$2); print $2}')
+		echo "$dst/$(prefix $mask) dev $dev proto kernel scope link src $src"
+	done
+	;;
+addr|address|a)
+	case "$2" in
+	add|del|delete|flush)
+		op=$2; shift 2
+		addr=""; [ "$op" = "flush" ] || { addr=$1; shift; }
+		dev=""; label=""; bcast=""; peer=""
+		while [ $# -gt 0 ]; do
+			case "$1" in
+			dev) dev=$2; shift ;;
+			label) label=$2; shift ;;
+			broadcast|brd) bcast=$2; shift ;;
+			peer) peer=$2; shift ;;
+			esac
+			shift
+		done
+		[ -n "$dev" ] || exit 1
+		if [ "$op" = "add" ]; then
+			mask=""
+			case "$addr" in
+			*/*.*) mask=${addr#*/} ;;
+			*/*) mask=$(netmask "${addr#*/}") ;;
+			esac
+			exec ifconfig "${label:-$dev}" "${addr%/*}" ${mask:+netmask $mask} \
+				${bcast:+broadcast $bcast} ${peer:+pointopoint $peer}
+		fi
+		# del/flush: an alias label is torn down, the primary address is cleared
+		if [ -n "$label" ] && [ "$label" != "$dev" ]; then
+			exec ifconfig "$label" down
+		fi
+		exec ifconfig "$dev" 0.0.0.0
+		;;
+	""|show|list) ;;
+	*) exec busybox ip "$@" ;;
+	esac
+	dev=""; [ "$2" = "show" ] && [ "$3" = "dev" ] && dev=$4
+	[ "$2" = "show" ] && [ -n "$3" ] && [ "$3" != "dev" ] && dev=$3
+	for n in ${dev:-$(ls /sys/class/net)}; do
+		ifconfig $n 2>/dev/null | awk -v n=$n '
+			/HWaddr/ {mac=$NF; idx++}
+			/inet addr/ {sub("addr:","",$2); sub("Mask:","",$4); ip=$2; mask=$4}
+			END {
+				m=mask; cmd="echo " m; p=0; split(m,o,"."); for(i=1;i<=4;i++){v=o[i]; while(v>0){p+=v%2; v=int(v/2)}}
+				print idx ": " n ": <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500";
+				if (mac) print "    link/ether " mac " brd ff:ff:ff:ff:ff:ff";
+				if (ip) print "    inet " ip "/" p " scope global " n;
+			}'
+	done
+	;;
+link|l)
+	# busybox ifupdown: "ip link set[ mtu N][ addr MAC] IFACE up|down";
+	# S40network: "ip link set dev wlan0 address MAC"
+	if [ "$2" = "set" ]; then
+		shift 2
+		dev=""; hw=""; mtu=""; state=""
+		while [ $# -gt 0 ]; do
+			case "$1" in
+			dev) dev=$2; shift ;;
+			addr|address) hw=$2; shift ;;
+			mtu) mtu=$2; shift ;;
+			up|down) state=$1 ;;
+			*) [ -n "$dev" ] || dev=$1 ;;
+			esac
+			shift
+		done
+		[ -n "$dev" ] || exit 1
+		if [ -n "$hw" ]; then
+			ifconfig "$dev" down 2>/dev/null
+			ifconfig "$dev" hw ether "$hw" || exit 1
+		fi
+		if [ -n "$mtu" ]; then
+			ifconfig "$dev" mtu "$mtu" || exit 1
+		fi
+		[ -z "$state" ] || exec ifconfig "$dev" "$state"
+		exit 0
+	fi
+	exec busybox ip "$@"
+	;;
+*)
+	exec busybox ip "$@"
+	;;
+esac

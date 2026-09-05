@@ -5,7 +5,7 @@
 ################################################################################
 
 DIVINUS_SITE = $(call github,openipc,divinus,$(DIVINUS_VERSION))
-DIVINUS_VERSION = HEAD
+DIVINUS_VERSION = ec152160c41a52178922e2d3bea26d6acfc367b5
 DIVINUS_LICENSE = MIT
 DIVINUS_LICENSE_FILES = LICENSE
 
